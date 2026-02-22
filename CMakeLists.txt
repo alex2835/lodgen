@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.22)
 project(lodgen LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Build assimp as a static library, disable unnecessary features
@@ -21,5 +22,25 @@ set(MESHOPT_INSTALL OFF CACHE BOOL "" FORCE)
 add_subdirectory(deps/assimp-6.0.4)
 add_subdirectory(deps/meshoptimizer-1.0)
 
-add_executable(lodgen src/main.cpp)
-target_link_libraries(lodgen PRIVATE assimp meshoptimizer)
+file(GLOB_RECURSE SRCS lodgen/*.cpp)
+file(GLOB_RECURSE HDRS lodgen/*.hpp)
+add_library(lodgen STATIC ${SRCS} ${HDRS})
+target_include_directories(lodgen PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(lodgen PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/deps/stb)
+target_link_libraries(lodgen PUBLIC assimp meshoptimizer)
+
+install(TARGETS lodgen
+    ARCHIVE DESTINATION lib)
+install(DIRECTORY lodgen/
+    DESTINATION include/lodgen
+    FILES_MATCHING PATTERN "*.hpp"
+    PATTERN "stb_impl.cpp" EXCLUDE)
+
+option(LODGENCLI "Build lodgen cli" ON)
+if (LODGENCLI)
+    add_executable(lodgencli lodgencli/main.cpp)
+    target_include_directories(lodgencli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/deps)
+    target_link_libraries(lodgencli PRIVATE lodgen)
+    install(TARGETS lodgencli
+        RUNTIME DESTINATION bin)
+endif()
