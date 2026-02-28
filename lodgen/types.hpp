@@ -16,7 +16,8 @@ struct AiSceneDeleter
     void operator()( const aiScene* scene ) const { aiFreeScene( scene ); }
 };
 
-using ScenePtr = std::unique_ptr<const aiScene, AiSceneDeleter>;
+using ScenePtr        = std::unique_ptr<const aiScene, AiSceneDeleter>;
+using MutableScenePtr = std::unique_ptr<aiScene, AiSceneDeleter>;
 
 enum class ErrorCode
 {

@@ -1,46 +1,40 @@
 #include <lodgen/lodgen.hpp>
 #include <lodgen/scene_io.hpp>
 #include <cxxopts.hpp>
+#include <filesystem>
 #include <iostream>
+#include <string>
+#include <vector>
 
-static void printError( const lodgen::Error& err )
-{
-    std::cerr << "Error: " << err.message << "\n";
-
-    if ( err.code == lodgen::ErrorCode::UnsupportedFormat )
-    {
-        std::cerr << "Supported formats:";
-        for ( const auto& fmt : lodgen::supportedFormats() )
-            std::cerr << " " << fmt;
-        std::cerr << "\n";
-    }
-}
+namespace fs = std::filesystem;
 
 int main( int argc, char* argv[] )
 {
-    cxxopts::Options options( "lodgencli", "Mesh LOD generator" );
+    cxxopts::Options options( "lodgencli", "LOD generator — mesh simplification + optional texture processing" );
     options.add_options()
-        ( "i,input",    "Input model file",
-          cxxopts::value<std::string>() )
-        ( "o,output",   "Output directory (default: ./output)",
-          cxxopts::value<std::string>()->default_value( "output" ) )
-        ( "r,ratios",   "Triangle reduction ratios (default: 0.5 0.25 0.125)",
-          cxxopts::value<std::vector<float>>()->default_value( "0.5,0.25,0.125" ) )
-        ( "t,textures", "Resize textures proportional to mesh ratio" )
-        ( "a,atlas",    "Pack all textures into a single atlas" )
-        ( "h,help",     "Print usage" );
+        ( "input",     "Input model file",
+            cxxopts::value<std::string>() )
+        ( "o,output",  "Output directory (default: output)",
+            cxxopts::value<std::string>()->default_value( "output" ) )
+        ( "r,ratios",  "Comma-separated LOD ratios, e.g. 0.5,0.25",
+            cxxopts::value<std::string>()->default_value( "0.5,0.25" ) )
+        ( "t,textures","Resize textures proportionally to each LOD ratio",
+            cxxopts::value<bool>()->default_value( "false" ) )
+        ( "a,atlas",   "Build per-type texture atlases after LOD generation",
+            cxxopts::value<bool>()->default_value( "false" ) )
+        ( "h,help",    "Show help" );
 
     options.parse_positional( { "input" } );
-    options.positional_help( "<input_file>" );
+    options.positional_help( "<model>" );
 
     cxxopts::ParseResult args;
     try
     {
         args = options.parse( argc, argv );
     }
-    catch ( const cxxopts::exceptions::exception& e )
+    catch ( const std::exception& e )
     {
-        std::cerr << "Error: " << e.what() << "\n\n" << options.help() << "\n";
+        std::cerr << "Error: " << e.what() << "\n" << options.help() << "\n";
         return 1;
     }
 
@@ -50,82 +44,93 @@ int main( int argc, char* argv[] )
         return args.count( "help" ) ? 0 : 1;
     }
 
-    lodgen::fs::path inputPath( args["input"].as<std::string>() );
-    lodgen::fs::path outputDir( args["output"].as<std::string>() );
+    // ── parse arguments ───────────────────────────────────────────────────────
 
-    auto ratios = args["ratios"].as<std::vector<float>>();
-    for ( float r : ratios )
+    fs::path inputPath  = args["input"].as<std::string>();
+    fs::path outputDir  = args["output"].as<std::string>();
+    bool     doTextures = args["textures"].as<bool>();
+    bool     doAtlas    = args["atlas"].as<bool>();
+
+    std::vector<float> ratios;
     {
-        if ( r <= 0.0f || r >= 1.0f )
-        {
-            std::cerr << "Error: ratio " << r << " must be in range (0, 1)\n";
-            return 1;
+        std::string ratioStr = args["ratios"].as<std::string>();
+        std::string token;
+        for ( char c : ratioStr ) {
+            if ( c == ',' ) {
+                if ( !token.empty() ) ratios.push_back( std::stof( token ) );
+                token.clear();
+            } else {
+                token += c;
+            }
         }
+        if ( !token.empty() ) ratios.push_back( std::stof( token ) );
+    }
+    if ( ratios.empty() )
+    {
+        std::cerr << "Error: no valid ratios specified\n";
+        return 1;
     }
 
-    const bool useTextures = args.count( "textures" ) > 0;
-    const bool useAtlas    = args.count( "atlas" ) > 0;
+    // ── load source scene ─────────────────────────────────────────────────────
 
-    // Load scene
-    std::cout << "Loading: " << inputPath.filename().string() << "\n";
     auto sceneResult = lodgen::loadScene( inputPath );
     if ( !sceneResult )
     {
-        printError( sceneResult.error() );
+        std::cerr << "Failed to load '" << inputPath.string() << "': "
+                  << sceneResult.error().message << "\n";
         return 1;
     }
-
     const aiScene* scene = sceneResult->get();
-    std::cout << "  " << scene->mNumMeshes << " mesh(es), "
-              << scene->mNumTextures << " embedded texture(s)\n";
-    for ( unsigned int i = 0; i < scene->mNumMeshes; ++i )
-    {
-        const aiMesh* mesh = scene->mMeshes[i];
-        std::cout << "  [" << i << "] ";
-        if ( mesh->mName.length > 0 )
-            std::cout << mesh->mName.C_Str() << " ";
-        std::cout << mesh->mNumVertices << " verts, " << mesh->mNumFaces << " tris\n";
-    }
 
-    // Build texture options if needed
-    std::unique_ptr<lodgen::TextureOptions> texOpts;
-    if ( useTextures || useAtlas )
-    {
-        texOpts = std::make_unique<lodgen::TextureOptions>();
-        texOpts->resizeTextures = useTextures;
-        texOpts->buildAtlas     = useAtlas;
-        texOpts->modelDir       = inputPath.parent_path();
-    }
+    // ── step 1: generate LODs ─────────────────────────────────────────────────
 
-    // Generate LODs
-    auto lodsResult = lodgen::generateLods( scene, inputPath, outputDir, ratios, texOpts.get() );
+    lodgen::TextureOptions texOpts;
+    texOpts.modelDir       = inputPath.parent_path();
+    texOpts.resizeTextures = true;
+
+    auto lodsResult = lodgen::generateLods(
+        scene, inputPath, outputDir, ratios,
+        doTextures ? &texOpts : nullptr );
+
     if ( !lodsResult )
     {
-        printError( lodsResult.error() );
+        std::cerr << "LOD generation failed: " << lodsResult.error().message << "\n";
         return 1;
     }
 
-    // Report results
-    for ( size_t i = 0; i < lodsResult->size(); ++i )
+    for ( const auto& info : *lodsResult )
     {
-        const auto& lod = ( *lodsResult )[i];
-        std::cout << "\nLOD " << ( i + 1 )
-                  << " (" << static_cast<int>( lod.ratio * 100 ) << "%) -> "
-                  << lod.outputPath.string() << "\n";
+        std::cout << "lod (ratio=" << info.ratio << "): " << info.outputPath.string() << "\n";
+        for ( size_t i = 0; i < info.meshResults.size(); ++i )
+            std::cout << "  mesh[" << i << "] "
+                      << info.meshResults[i].simplifiedTriangles << " tris\n";
+        if ( info.textureStats )
+            std::cout << "  textures: " << info.textureStats->outputCount
+                      << "/" << info.textureStats->inputCount << " processed\n";
+    }
 
-        for ( size_t m = 0; m < lod.meshResults.size(); ++m )
-            std::cout << "  [" << m << "] " << lod.meshResults[m].simplifiedTriangles << " tris\n";
+    // ── step 2: build texture atlases (optional) ──────────────────────────────
 
-        if ( lod.textureStats )
+    if ( doAtlas )
+    {
+        for ( const auto& info : *lodsResult )
         {
-            const auto& ts = *lod.textureStats;
-            std::cout << "  textures: " << ts.inputCount << " -> " << ts.outputCount;
-            if ( ts.atlasWidth > 0 )
-                std::cout << " (atlas " << ts.atlasWidth << "x" << ts.atlasHeight << ")";
-            std::cout << "\n";
+            lodgen::AtlasOptions atlasOpts;
+            atlasOpts.modelDir  = inputPath.parent_path();
+            atlasOpts.outputDir = info.outputPath.parent_path();
+
+            auto atlasResult = lodgen::buildLodAtlas( info.outputPath, atlasOpts );
+            if ( !atlasResult )
+            {
+                std::cerr << "Atlas failed for '" << info.outputPath.string() << "': "
+                          << atlasResult.error().message << "\n";
+                return 1;
+            }
+            for ( const auto& a : *atlasResult )
+                std::cout << "  atlas: " << a.filename << " (" << a.inputCount
+                          << " textures, " << a.width << "x" << a.height << ")\n";
         }
     }
 
-    std::cout << "\nDone.\n";
     return 0;
 }

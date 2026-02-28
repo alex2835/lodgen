@@ -13,7 +13,7 @@ Result<ScenePtr> generateLod( const aiScene* scene, float ratio, const TextureOp
     if ( !copy )
         return std::unexpected( Error{ ErrorCode::SceneCopyFailed, "aiCopyScene failed" } );
 
-    ScenePtr result( copy ); // RAII cleanup on any error path below
+    ScenePtr result( copy );
 
     for ( unsigned int i = 0; i < copy->mNumMeshes; ++i )
         simplify( copy->mMeshes[i], ratio );
@@ -21,13 +21,6 @@ Result<ScenePtr> generateLod( const aiScene* scene, float ratio, const TextureOp
     if ( texOpts && texOpts->resizeTextures )
     {
         auto r = processTextures( copy, ratio, *texOpts );
-        if ( !r )
-            return std::unexpected( r.error() );
-    }
-
-    if ( texOpts && texOpts->buildAtlas )
-    {
-        auto r = buildAtlas( copy );
         if ( !r )
             return std::unexpected( r.error() );
     }
@@ -47,10 +40,9 @@ Result<std::vector<LodInfo>> generateLods(
 
     for ( size_t i = 0; i < ratios.size(); ++i )
     {
-        // Build lod output directory first — processTextures needs it for
-        // writing resized external texture files alongside the model
-        fs::path lodDir  = outputDir / ( "lod" + std::to_string( i + 1 ) );
-        fs::path outPath = lodDir / inputPath.filename();
+        const auto lodPostfix = "lod" + std::to_string( i + 1 );
+        fs::path lodDir  = outputDir / lodPostfix;
+        fs::path outPath = lodDir / ( inputPath.stem().string() + '_' + lodPostfix + inputPath.extension().string() );
 
         std::error_code ec;
         fs::create_directories( lodDir, ec );
@@ -58,18 +50,15 @@ Result<std::vector<LodInfo>> generateLods(
             return std::unexpected( Error{ ErrorCode::ExportFailed,
                 "Could not create directory " + lodDir.string() + ": " + ec.message() } );
 
-        // Copy scene
         aiScene* copy = nullptr;
         aiCopyScene( scene, &copy );
         if ( !copy )
             return std::unexpected( Error{ ErrorCode::SceneCopyFailed, "aiCopyScene failed" } );
         ScenePtr lodScene( copy );
 
-        // Simplify meshes
         for ( unsigned int m = 0; m < copy->mNumMeshes; ++m )
             simplify( copy->mMeshes[m], ratios[i] );
 
-        // Process textures — pass lodDir so external files land next to the model
         std::optional<TextureStats> texStats;
         if ( texOpts && texOpts->resizeTextures )
         {
@@ -82,20 +71,10 @@ Result<std::vector<LodInfo>> generateLods(
             texStats = *r;
         }
 
-        if ( texOpts && texOpts->buildAtlas )
-        {
-            auto r = buildAtlas( copy );
-            if ( !r )
-                return std::unexpected( r.error() );
-            texStats = *r;
-        }
-
-        // Save model
         auto saveResult = saveScene( lodScene.get(), outPath );
         if ( !saveResult )
             return std::unexpected( saveResult.error() );
 
-        // Collect per-mesh triangle counts
         LodInfo info;
         info.ratio        = ratios[i];
         info.outputPath   = outPath;
@@ -112,6 +91,29 @@ Result<std::vector<LodInfo>> generateLods(
     }
 
     return results;
+}
+
+Result<std::vector<AtlasInfo>> buildLodAtlas(
+    const fs::path& modelPath,
+    const AtlasOptions& opts )
+{
+    // Load the saved LOD model as a mutable copy
+    auto sceneResult = loadSceneMutable( modelPath );
+    if ( !sceneResult )
+        return std::unexpected( sceneResult.error() );
+
+    aiScene* scene = sceneResult->get();
+
+    auto atlasResult = buildAtlas( scene, opts );
+    if ( !atlasResult )
+        return std::unexpected( atlasResult.error() );
+
+    // Re-save model with updated material paths and embedded atlases
+    auto saveResult = saveScene( scene, modelPath );
+    if ( !saveResult )
+        return std::unexpected( saveResult.error() );
+
+    return atlasResult;
 }
 
 } // namespace lodgen

@@ -34,10 +34,9 @@ inline constexpr aiTextureType kTextureTypes[] = {
 
 struct TextureOptions
 {
-    bool     resizeTextures = true;  // downscale proportional to mesh ratio
-    bool     buildAtlas     = false; // pack all textures into one atlas image
-    fs::path modelDir;               // source model directory — for resolving external texture paths
-    fs::path outputDir;              // LOD output directory — resized external files are written here
+    bool     resizeTextures = true; // downscale proportional to mesh ratio
+    fs::path modelDir;              // source model directory — for resolving external texture paths
+    fs::path outputDir;             // LOD output directory — resized external files are written here
 };
 
 struct TextureStats
